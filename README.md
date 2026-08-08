@@ -9,9 +9,9 @@
 | **Python** | 3.13 / 3.12 | winget（回退官方安装包）+ 清华 pip 源 |
 | **MySQL** | 8.4 LTS | 官方 zip → 初始化 → 注册 Windows 服务 |
 | **Redis** | 8.x | redis-windows 发行版 → 注册 Windows 服务 |
+| **Git** | 最新 | winget（回退 git-for-windows 官方安装包）+ 全局配置 |
 | **IntelliJ IDEA** | 最新 | winget（回退 JetBrains 官方直链） |
 | **Trae** | 最新 | winget `ByteDance.Trae.CN` |
-| Git（可选） | 最新 | winget |
 
 ## 怎么用
 
@@ -111,6 +111,39 @@ JAVA_HOME = C:\devtools\java\current   ← junction
 
 IDEA 里想跟着切，把 Project SDK 指到 `C:\devtools\java\current` 即可（而不是指到具体某个 `jdk-21`）。
 
+## Git 全局配置
+
+装完 Git 会顺手补一批全局配置，**只补没配过的项** —— 这台机器上如果早就有人调过
+`core.autocrlf`，脚本不会替他改。
+
+| 配置项 | 值 | 为什么 |
+|---|---|---|
+| `core.quotepath` | `false` | 不然中文文件名显示成 `\344\270\255` 这种八进制转义 |
+| `core.longpaths` | `true` | 绕开 Windows 260 字符路径上限，Java / node 项目很容易撞到 |
+| `core.autocrlf` | `true` | Git for Windows 默认值，可在配置文件里改 |
+| `core.ignorecase` | `false` | 避免只改大小写的重命名不被识别 |
+| `i18n.commitencoding` | `utf-8` | 中文提交信息不乱码 |
+| `i18n.logoutputencoding` | `utf-8` | 同上，`git log` 侧 |
+| `credential.helper` | `manager` | 凭据交给 Windows 凭据管理器 |
+| `init.defaultBranch` | `main` | |
+| `pull.rebase` | `false` | 消掉 divergent branches 的提示 |
+| `fetch.prune` | `true` | 自动清理已删除的远端分支 |
+
+**关于 `core.autocrlf`**：默认 `true` 是 Git for Windows 的标准行为。但如果你的仓库里有
+要丢进 Docker / Linux 跑的 `.sh` 脚本，建议在 `devenv.config.psd1` 里改成 `'input'` ——
+否则脚本被检出成 CRLF，在容器里会报 `bad interpreter: no such file or directory`。
+
+**`user.name` / `user.email` 脚本不会替你填**（那是个人身份，不该由安装脚本决定）。
+没配的话装完会提醒你：
+
+```bash
+git config --global user.name "你的名字"
+```
+
+```bash
+git config --global user.email "你的邮箱"
+```
+
 ## 装完的目录结构
 
 ```
@@ -194,7 +227,7 @@ BOM，否则 PowerShell 5.1 按 ANSI 读，中文全乱码。
 - **MySQL 8.0 已于 2026-04 随 8.0.46 EOL**，所以默认装 8.4 LTS。老项目确实要 8.0 的话，
   改配置 `Series = '8.0'`，脚本会照做并给出警告。
 - 只支持 64 位 Windows 10 及以上。
-- winget 不可用时（老系统 / 没装 App Installer），IDEA 和 Python 走官方直链兜底，Trae 只能手动。
+- winget 不可用时（老系统 / 没装 App Installer），Git / IDEA / Python 走官方直链兜底，Trae 只能手动。
 
 ## 排错
 

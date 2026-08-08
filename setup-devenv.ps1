@@ -78,6 +78,7 @@ $script:ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $script:AllComponents = @('jdk', 'maven', 'python', 'mysql', 'redis', 'idea', 'trae', 'git')
 $script:Results = [System.Collections.Generic.List[object]]::new()
 $script:StartTime = Get-Date
+$script:GitIdentityMissing = $false
 
 #region ───────────────────────────── 日志 ─────────────────────────────
 
@@ -130,7 +131,7 @@ function Write-Banner {
 function Get-DefaultConfig {
     @{
         Root         = 'C:\devtools'
-        Components   = @('jdk', 'maven', 'python', 'mysql', 'redis', 'idea', 'trae')
+        Components   = @('jdk', 'maven', 'git', 'python', 'mysql', 'redis', 'idea', 'trae')
         UseMirror    = $true
 
         Jdk = @{
@@ -171,6 +172,14 @@ function Get-DefaultConfig {
         Trae = @{
             WingetIds = @('ByteDance.Trae.CN', 'ByteDance.Trae')
             DownloadPage = 'https://www.trae.com.cn/download'
+        }
+        Git = @{
+            # 装完顺手配的全局项。已经手工配过的不会被覆盖。
+            ConfigureGlobal = $true
+            # true  = Git for Windows 默认：检出转 CRLF、提交转 LF
+            # input = 只在提交时转 LF，检出保持原样。仓库里有 sh 脚本要进 Docker 时用这个
+            AutoCrlf        = 'true'
+            DefaultBranch   = 'main'
         }
     }
 }
@@ -328,6 +337,29 @@ function Write-TextFile {
     New-Dir (Split-Path $Path -Parent)
     [IO.File]::WriteAllText($Path, $Content, [Text.UTF8Encoding]::new($Bom.IsPresent))
     Write-Ok "写入 $Path"
+}
+
+function Invoke-NativeLogged {
+    <#
+        跑一个外部程序，把它的 stdout+stderr 都写进日志，返回退出码。
+
+        为什么要专门包一层：脚本全局是 $ErrorActionPreference = 'Stop'，
+        这时候对原生命令用 2>&1，PowerShell 5.1 会把写到 stderr 的每一行
+        都变成 NativeCommandError 终止性错误。而 java -version、pip、winget
+        都往 stderr 写正常输出 —— 不隔离就会把成功的安装误判成失败。
+    #>
+    param(
+        [Parameter(Mandatory)][string]$FilePath,
+        [string[]]$Arguments = @(),
+        [string]$Prefix = '  '
+    )
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & $FilePath @Arguments 2>&1 | ForEach-Object { Write-Log "$Prefix$_" }
+        return $LASTEXITCODE
+    }
+    finally { $ErrorActionPreference = $prev }
 }
 
 function Get-MirrorUrls {
@@ -514,8 +546,13 @@ function Set-DirectoryJunction {
 function Test-WingetInstalled {
     param([string]$Id)
     if (-not $script:HasWinget) { return $false }
-    $out = & winget list --exact --id $Id --accept-source-agreements 2>&1 | Out-String
-    return ($out -match [regex]::Escape($Id))
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $out = & winget list --exact --id $Id --accept-source-agreements 2>&1 | Out-String
+        return ($out -match [regex]::Escape($Id))
+    }
+    finally { $ErrorActionPreference = $prevEap }
 }
 
 function Install-ViaWinget {
@@ -536,8 +573,7 @@ function Install-ViaWinget {
                     '--disable-interactivity')
         if ($Scope) { $wgArgs += @('--scope', $Scope) }
 
-        & winget @wgArgs 2>&1 | ForEach-Object { Write-Log "  $_" }
-        $code = $LASTEXITCODE
+        $code = Invoke-NativeLogged -FilePath 'winget' -Arguments $wgArgs
         # 0 成功；-1978335189 (0x8A15002B) = 已是最新版
         if ($code -eq 0 -or $code -eq -1978335189) {
             Write-Ok "winget 安装成功：$id"
@@ -744,8 +780,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0jdk.ps1" %*
 
     # 让普通用户无需提权也能切换（只放开 java 这一个目录，S-1-5-32-545 = BUILTIN\Users）
     if (-not $DryRun) {
-        & icacls.exe $JavaRoot /grant '*S-1-5-32-545:(OI)(CI)M' /T /Q 2>&1 | Out-Null
-        if ($LASTEXITCODE -ne 0) {
+        $code = Invoke-NativeLogged -FilePath 'icacls.exe' `
+                    -Arguments @($JavaRoot, '/grant', '*S-1-5-32-545:(OI)(CI)M', '/T', '/Q')
+        if ($code -ne 0) {
             Write-Warn 'java 目录授权失败，以后切换 JDK 时会弹 UAC 提权，功能不受影响。'
         }
     }
@@ -861,7 +898,8 @@ function Install-Python {
 
     $existing = Get-Command python -ErrorAction SilentlyContinue
     if ($existing -and -not $Force) {
-        $v = & python --version 2>&1
+        $v = 'python'
+        try { $v = ((& python --version 2>&1) | Out-String).Trim() } catch { }
         Write-Skip "已检测到 $v （$($existing.Source)）"
     }
     else {
@@ -925,12 +963,13 @@ function Install-PythonBasePackages {
     if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
         Write-Warn 'python 不在 PATH 中，跳过基础包安装（重开终端后可手动执行）'; return
     }
+    # pip 的进度条和告警都走 stderr，必须用 Invoke-NativeLogged 隔离
     foreach ($cmd in @(
         @('-m', 'pip', 'install', '--upgrade', 'pip'),
         @('-m', 'pip', 'install', 'virtualenv', 'pipx')
     )) {
-        try { & python @cmd 2>&1 | ForEach-Object { Write-Log "  $_" } }
-        catch { Write-Warn "pip 命令失败：$($_.Exception.Message)" }
+        $code = Invoke-NativeLogged -FilePath 'python' -Arguments $cmd
+        if ($code -ne 0) { Write-Warn "pip 命令返回 $code：python $($cmd -join ' ')" }
     }
 }
 
@@ -1014,16 +1053,16 @@ function Install-MySql {
         Write-Log '初始化数据目录（--initialize-insecure，root 初始无密码）...'
         if (Test-Path $dataDir) { Remove-Item $dataDir -Recurse -Force }
         New-Dir $dataDir
-        & $mysqld "--defaults-file=$iniPath" --initialize-insecure --console 2>&1 |
-            ForEach-Object { Write-Log "  $_" }
-        if ($LASTEXITCODE -ne 0) { throw "mysqld --initialize-insecure 失败（exit=$LASTEXITCODE）" }
+        $code = Invoke-NativeLogged -FilePath $mysqld `
+                    -Arguments @("--defaults-file=$iniPath", '--initialize-insecure', '--console')
+        if ($code -ne 0) { throw "mysqld --initialize-insecure 失败（exit=$code），详见日志" }
         Write-Ok '数据目录初始化完成'
     }
     else { Write-Skip "数据目录已初始化：$dataDir" }
 
     if (-not (Get-Service -Name $svcName -ErrorAction SilentlyContinue)) {
-        & $mysqld "--install" $svcName "--defaults-file=$iniPath" 2>&1 |
-            ForEach-Object { Write-Log "  $_" }
+        [void](Invoke-NativeLogged -FilePath $mysqld `
+                   -Arguments @('--install', $svcName, "--defaults-file=$iniPath"))
         Write-Ok "已注册 Windows 服务：$svcName"
     }
     Set-Service -Name $svcName -StartupType Automatic
@@ -1100,6 +1139,8 @@ function Set-MySqlRootPassword {
 
     # 密码不能出现在命令行参数里（任务管理器/进程列表可见），走临时文件 + stdin
     $sqlFile = Join-Path ([IO.Path]::GetTempPath()) ("mysql-init-" + [Guid]::NewGuid().ToString('N') + '.sql')
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'   # mysql.exe 的告警走 stderr
     try {
         [IO.File]::WriteAllText($sqlFile, $sql, [Text.UTF8Encoding]::new($false))
         # 用 stdin 而不是 -e "source <路径>"：路径里有空格时 source 会断
@@ -1113,6 +1154,7 @@ function Set-MySqlRootPassword {
         }
     }
     finally {
+        $ErrorActionPreference = $prevEap
         if (Test-Path $sqlFile) {
             # 覆写后再删，避免密码残留在磁盘扇区
             [IO.File]::WriteAllText($sqlFile, ('0' * 4096))
@@ -1264,8 +1306,8 @@ function Register-RedisService {
     if ($svcExe) {
         try {
             Write-Log "使用 RedisService.exe 注册服务..."
-            & $svcExe.FullName install -c $Conf --dir $DataDir --port "$($Cfg.Redis.Port)" 2>&1 |
-                ForEach-Object { Write-Log "  $_" }
+            [void](Invoke-NativeLogged -FilePath $svcExe.FullName -Arguments @(
+                       'install', '-c', $Conf, '--dir', $DataDir, '--port', "$($Cfg.Redis.Port)"))
             Start-Sleep -Seconds 2
             if (Get-Service -Name 'Redis' -ErrorAction SilentlyContinue) {
                 Set-Service -Name 'Redis' -StartupType Automatic
@@ -1376,14 +1418,127 @@ function Install-Trae {
 function Install-Git {
     param([hashtable]$Cfg)
     Write-Step '安装 Git'
-    if ((Get-Command git -ErrorAction SilentlyContinue) -and -not $Force) {
-        Write-Skip "已安装：$(git --version)"
-        Add-Result -Name 'Git' -Status 'SKIP' -Detail (git --version)
+
+    $have = Get-Command git -ErrorAction SilentlyContinue
+    if ($have -and -not $Force) {
+        Write-Skip "已安装：$(& git --version)（$($have.Source)）"
+    }
+    else {
+        $id = Install-ViaWinget -Ids @('Git.Git') -Scope 'machine'
+        if (-not $id) {
+            try { Install-GitFromOfficial -Cfg $Cfg }
+            catch {
+                Write-Err "Git 安装失败：$($_.Exception.Message)"
+                Add-Result -Name 'Git' -Status 'FAIL' -Detail '请手动安装 https://git-scm.com/download/win'
+                return
+            }
+        }
+        Update-SessionPath
+    }
+
+    if ($Cfg.Git.ConfigureGlobal) { Set-GitGlobalConfig -Cfg $Cfg }
+
+    $ver = '已安装'
+    try { $ver = ((& git --version 2>&1) | Out-String).Trim() } catch { }
+    Add-Result -Name 'Git' -Status 'OK' -Detail $ver
+}
+
+function Install-GitFromOfficial {
+    <# winget 不可用时，从 git-for-windows 的 GitHub Release 抓 64 位安装包 #>
+    param([hashtable]$Cfg)
+    Write-Log 'winget 不可用，改用 git-for-windows 官方安装包'
+
+    $url = $null
+    $ver = 'latest'
+    try {
+        $rel = Invoke-RestMethod -Uri 'https://api.github.com/repos/git-for-windows/git/releases/latest' `
+                                 -Headers @{ 'User-Agent' = 'devenv-setup' } -TimeoutSec 25
+        # 只要 Git-x.y.z-64-bit.exe，排除 PortableGit / MinGit
+        $asset = $rel.assets |
+                 Where-Object { $_.name -match '^Git-[\d.]+-64-bit\.exe$' } |
+                 Select-Object -First 1
+        if ($asset) {
+            $url = $asset.browser_download_url
+            $ver = $rel.tag_name
+            Write-Log "解析到 Git 最新版：$ver / $($asset.name)"
+        }
+    }
+    catch { Write-Warn "解析 Git 最新版失败：$($_.Exception.Message)" }
+
+    if (-not $url) { throw '无法从 GitHub 解析 Git 安装包地址' }
+
+    $exe = Join-Path (Join-Path $Cfg.Root '.cache') "Git-$ver-64-bit.exe"
+    Invoke-Download -Urls (Get-MirrorUrls -Url $url -Cfg $Cfg) -OutFile $exe -MinBytes 30MB | Out-Null
+    if ($DryRun) { return }
+
+    # Inno Setup 静默参数。NOCANCEL/SP- 防止弹任何交互
+    $p = Start-Process -FilePath $exe -Wait -PassThru -ArgumentList @(
+        '/VERYSILENT', '/NORESTART', '/NOCANCEL', '/SP-',
+        '/CLOSEAPPLICATIONS', '/RESTARTAPPLICATIONS',
+        '/COMPONENTS=icons,ext\reg\shellhere,assoc,assoc_sh')
+    if ($p.ExitCode -ne 0) { throw "Git 安装器退出码 $($p.ExitCode)" }
+    Write-Ok "Git $ver 安装完成"
+}
+
+function Set-GitGlobalConfig {
+    <#
+        写全局 git config。原则：只补没配过的，绝不覆盖用户已有的设置
+        —— 这台机器上可能早就有人调过 core.autocrlf，脚本没资格替他改。
+    #>
+    param([hashtable]$Cfg)
+
+    if ($DryRun) { Write-Log '[DryRun] 配置 git global'; return }
+    if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+        Write-Warn 'git 不在 PATH 中，跳过全局配置（重开终端后可手动配）'
         return
     }
-    $id = Install-ViaWinget -Ids @('Git.Git') -Scope 'machine'
-    if ($id) { Add-Result -Name 'Git' -Status 'OK' -Detail $id }
-    else { Add-Result -Name 'Git' -Status 'FAIL' -Detail '请手动安装 https://git-scm.com/' }
+
+    # git config --get 在键不存在时退出码为 1，全局 EAP=Stop 下会炸
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+
+    $desired = [ordered]@{
+        'init.defaultBranch'     = $Cfg.Git.DefaultBranch
+        'core.autocrlf'          = $Cfg.Git.AutoCrlf
+        # 关掉后中文文件名才不会显示成 \344\270\255 这种八进制转义
+        'core.quotepath'         = 'false'
+        # Windows 260 字符路径上限，Java/node 项目很容易撞到
+        'core.longpaths'         = 'true'
+        'core.ignorecase'        = 'false'
+        'i18n.commitencoding'    = 'utf-8'
+        'i18n.logoutputencoding' = 'utf-8'
+        'credential.helper'      = 'manager'
+        'pull.rebase'            = 'false'
+        'fetch.prune'            = 'true'
+    }
+
+    foreach ($k in $desired.Keys) {
+        $current = (& git config --global --get $k 2>$null)
+        if ($LASTEXITCODE -eq 0 -and $current) {
+            Write-Skip "git config $k 已有值 '$current'，保留不动"
+            continue
+        }
+        & git config --global $k $desired[$k] 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) { Write-Ok "git config --global $k $($desired[$k])" }
+        else { Write-Warn "git config $k 设置失败" }
+    }
+
+    # user.name / user.email 属于个人身份，脚本不该替人填，但不填第一次提交就会失败
+    $name  = (& git config --global --get user.name  2>$null)
+    $email = (& git config --global --get user.email 2>$null)
+    if (-not $name -or -not $email) {
+        $script:GitIdentityMissing = $true
+        Write-Warn 'git 还没配 user.name / user.email，第一次 commit 会失败。'
+        Write-Warn '  git config --global user.name  "你的名字"'
+        Write-Warn '  git config --global user.email "你的邮箱"'
+    }
+    else {
+        Write-Ok "git 身份：$name <$email>"
+    }
+
+    }
+    finally { $ErrorActionPreference = $prevEap }
 }
 
 #endregion
@@ -1400,6 +1555,11 @@ function Invoke-Verification {
     Write-Step '安装后校验'
     if ($DryRun) { Write-Skip '演练模式，跳过校验'; return }
 
+    # java -version / git --version 这些都往 stderr 写，
+    # 全局的 EAP=Stop 会把它变成终止性错误，整段校验必须降级
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
     Update-SessionPath
     $javaCurrent = Join-Path $Cfg.Root 'java\current'
 
@@ -1416,7 +1576,7 @@ function Invoke-Verification {
             $out = & $c.Cmd
             if ($out) { Write-Ok "$($c.Name): $out" } else { Write-Warn "$($c.Name): 无输出" }
         }
-        catch { Write-Warn "$($c.Name): 不可用（重开终端后再试）" }
+        catch { Write-Warn "$($c.Name): 不可用（重开终端后再试）—— $($_.Exception.Message)" }
     }
 
     foreach ($s in @('MySQL84', 'MySQL80', 'MySQL97', 'Redis')) {
@@ -1434,6 +1594,8 @@ function Invoke-Verification {
         }
         catch { Write-Warn "redis-cli 探测失败：$($_.Exception.Message)" }
     }
+    }
+    finally { $ErrorActionPreference = $prevEap }
 }
 
 function Show-Summary {
@@ -1469,6 +1631,11 @@ function Show-Summary {
     Write-Host ''
     Write-Host '  ⚠  环境变量对"已经打开"的终端不生效，请重开一个终端窗口。' -ForegroundColor Yellow
     Write-Host '  ⚠  MySQL / Redis 密码是开发默认值，请勿用于生产或暴露到公网。' -ForegroundColor Yellow
+    if ($script:GitIdentityMissing) {
+        Write-Host '  ⚠  Git 还差身份信息，第一次 commit 前先执行：' -ForegroundColor Yellow
+        Write-Host '       git config --global user.name  "你的名字"' -ForegroundColor Yellow
+        Write-Host '       git config --global user.email "你的邮箱"' -ForegroundColor Yellow
+    }
     Write-Host ''
 
     $failed = @($script:Results | Where-Object { @('FAIL', 'WARN', 'MANUAL') -contains $_.Status })
@@ -1497,15 +1664,16 @@ function Main {
     New-Dir $cfg.Root
     New-Dir (Join-Path $cfg.Root '.cache')
 
+    # 顺序有讲究：快的小的先装，让人早点看到进展；MySQL 那个 200MB 的包放中间
     $installers = [ordered]@{
         'jdk'    = { Install-Jdk    -Cfg $cfg }
         'maven'  = { Install-Maven  -Cfg $cfg }
+        'git'    = { Install-Git    -Cfg $cfg }
         'python' = { Install-Python -Cfg $cfg }
         'mysql'  = { Install-MySql  -Cfg $cfg }
         'redis'  = { Install-Redis  -Cfg $cfg }
         'idea'   = { Install-Idea   -Cfg $cfg }
         'trae'   = { Install-Trae   -Cfg $cfg }
-        'git'    = { Install-Git    -Cfg $cfg }
     }
 
     foreach ($name in $installers.Keys) {

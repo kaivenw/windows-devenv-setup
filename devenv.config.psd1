@@ -8,9 +8,9 @@
     # 建议放在非系统盘，例如 'D:\devtools'
     Root = 'C:\devtools'
 
-    # 要安装的组件。可选：jdk maven python mysql redis idea trae git
-    # 想加 Git 就把 'git' 放进来
-    Components = @('jdk', 'maven', 'python', 'mysql', 'redis', 'idea', 'trae')
+    # 要安装的组件。可选：jdk maven git python mysql redis idea trae
+    # 不想装某个就从这里删掉
+    Components = @('jdk', 'maven', 'git', 'python', 'mysql', 'redis', 'idea', 'trae')
 
     # 是否使用国内镜像（阿里云 Maven / 清华 pip / GitHub 加速 / 华为云 MySQL）
     # 在海外或公司内网走代理时设为 $false
@@ -108,4 +108,32 @@
         WingetIds    = @('ByteDance.Trae.CN', 'ByteDance.Trae')
         DownloadPage = 'https://www.trae.com.cn/download'
     }
+
+    # ───────────────────────────── Git ─────────────────────────────
+    Git = @{
+        # 是否写全局 git config。
+        # 只补没配过的项，已经手工配过的一律保留不动
+        ConfigureGlobal = $true
+
+        # 行尾处理：
+        #   'true'  = Git for Windows 默认。检出转 CRLF，提交转 LF
+        #   'input' = 只在提交时转 LF，检出保持原样
+        #   'false' = 完全不转
+        # 仓库里有要丢进 Docker/Linux 跑的 .sh 脚本，用 'input' 更稳妥，
+        # 否则脚本被转成 CRLF 后在容器里会报 "bad interpreter: no such file"
+        AutoCrlf = 'true'
+
+        DefaultBranch = 'main'
+    }
+
+    # 除上面两项外，脚本还会补这些（同样只在未配置时才写）：
+    #   core.quotepath = false          中文文件名不显示成 \344\270\255
+    #   core.longpaths = true           绕开 Windows 260 字符路径上限
+    #   core.ignorecase = false         避免大小写改名不被识别
+    #   i18n.commitencoding = utf-8     中文提交信息不乱码
+    #   i18n.logoutputencoding = utf-8
+    #   credential.helper = manager     凭据走 Windows 凭据管理器
+    #   pull.rebase = false
+    #   fetch.prune = true
+    # user.name / user.email 属于个人身份，脚本不会替你填，只会提醒
 }
