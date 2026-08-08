@@ -1,0 +1,10 @@
+# 这些脚本对编码敏感：PowerShell 5.1 按 ANSI 读无 BOM 的 .ps1，中文会全乱码。
+# 强制 CRLF 检出，避免在 Linux/macOS 上 clone 后再拷到 Windows 时行尾被改掉。
+* text=auto
+
+*.ps1   text eol=crlf
+*.psd1  text eol=crlf
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+
+*.md    text eol=lf
