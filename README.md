@@ -210,3 +210,7 @@ BOM，否则 PowerShell 5.1 按 ANSI 读，中文全乱码。
 或者加 `-NoMirror` 试试直连官方源。
 
 **想从头再来** — 先 `uninstall-devenv.ps1 -Confirm2 -RemoveData`，再重新装。
+
+## 许可
+
+MIT，见 [LICENSE](LICENSE)。
