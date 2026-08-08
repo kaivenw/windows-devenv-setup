@@ -185,10 +185,17 @@ function Get-DefaultConfig {
 }
 
 function Merge-Config {
+    <#
+        把用户配置就地合并进默认配置，嵌套哈希表递归合并。
+
+        注意 [void]：递归调用末尾也会输出 $Base，不丢掉的话每递归一层
+        就往本函数的输出流塞一个哈希表，最终返回的是 Object[] 而不是
+        Hashtable，调用方拿到的 $cfg.Components 直接就没了。
+    #>
     param([hashtable]$Base, [hashtable]$Override)
     foreach ($k in $Override.Keys) {
         if ($Base.ContainsKey($k) -and $Base[$k] -is [hashtable] -and $Override[$k] -is [hashtable]) {
-            Merge-Config -Base $Base[$k] -Override $Override[$k]
+            [void](Merge-Config -Base $Base[$k] -Override $Override[$k])
         }
         else {
             $Base[$k] = $Override[$k]
@@ -209,6 +216,12 @@ function Import-DevEnvConfig {
         catch { Write-Warn "配置文件解析失败，使用默认配置: $($_.Exception.Message)" }
     }
     else { Write-Log "未找到配置文件，使用内置默认配置" }
+
+    # 兜底断言：合并后必须还是单个哈希表。变成数组说明某处漏了输出流，
+    # 后面所有 $cfg.XXX 都会以 PropertyNotFoundStrict 报错，不如在这里说清楚
+    if ($cfg -isnot [hashtable]) {
+        throw "配置合并结果类型异常（$($cfg.GetType().Name)），这是脚本 bug，请提 issue。"
+    }
 
     # 命令行参数优先级最高
     if ($Root)              { $cfg.Root = $Root }

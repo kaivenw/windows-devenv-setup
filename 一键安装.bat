@@ -2,36 +2,59 @@
 chcp 65001 >nul 2>&1
 setlocal EnableExtensions
 
-title Windows 开发环境一键安装
+rem ===========================================================================
+rem  Windows dev environment one-click installer -- launcher
+rem
+rem  KEEP THIS FILE PURE ASCII.
+rem
+rem  cmd.exe reads a .bat byte by byte and re-seeks the file position after
+rem  every command it runs. Multi-byte characters (Chinese, box drawing) throw
+rem  that position off, so cmd resumes from the middle of a line and tries to
+rem  execute the fragment -- you get "'xxx' is not recognized as an internal
+rem  or external command". It is intermittent and depends on line lengths,
+rem  which makes it a nightmare to debug.
+rem
+rem  All user-facing Chinese lives in setup-devenv.ps1, which is UTF-8 with a
+rem  BOM and handled properly by PowerShell.
+rem ===========================================================================
 
-set "SCRIPT_DIR=%~dp0"
-set "PS1=%SCRIPT_DIR%setup-devenv.ps1"
-set "ORIG_PROFILE=%USERPROFILE%"
+title Windows DevEnv Setup
+
+set "PS1=%~dp0setup-devenv.ps1"
 
 if not exist "%PS1%" (
     echo.
-    echo   [错误] 找不到 setup-devenv.ps1，请保持本 bat 与它在同一目录。
+    echo   [ERROR] setup-devenv.ps1 not found next to this file.
+    echo   Keep the whole folder together and run again.
     echo.
     pause
     exit /b 1
 )
 
-rem ── 检查管理员权限，没有就带上原始用户主目录重新提权启动 ──
+rem --- already elevated? ---
 net session >nul 2>&1
 if not errorlevel 1 goto :RUN
 
 echo.
-echo   正在请求管理员权限，请在弹出的 UAC 窗口点"是"...
+echo   Requesting administrator privileges...
+echo   Please click "Yes" on the UAC prompt.
 echo.
-powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-  "Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-NoExit','-File','%PS1%','-InvokingUserProfile','%ORIG_PROFILE%')"
+
+rem Relaunch this .bat elevated. Start-Process quotes -FilePath correctly,
+rem so paths containing spaces are fine.
+if "%~1"=="" (
+    powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+      "Start-Process -FilePath '%~f0' -Verb RunAs"
+) else (
+    powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+      "Start-Process -FilePath '%~f0' -ArgumentList '%*' -Verb RunAs"
+)
 exit /b 0
 
 :RUN
-powershell -NoProfile -ExecutionPolicy Bypass -File "%PS1%" -InvokingUserProfile "%ORIG_PROFILE%" %*
-echo.
-echo   ────────────────────────────────────────────────
-echo   安装流程结束。请关闭本窗口，重新打开一个新的终端。
-echo   ────────────────────────────────────────────────
+rem %USERPROFILE% is the real user here: UAC elevates the same account, and
+rem setup-devenv.ps1 falls back to the explorer.exe owner if it is not.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%PS1%" -InvokingUserProfile "%USERPROFILE%" %*
+
 echo.
 pause
